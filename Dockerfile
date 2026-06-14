@@ -1,12 +1,13 @@
 # FLUX.1-schnell on RunPod Serverless (text-to-image + image-to-image)
 #
-# Build:
-#   DOCKER_BUILDKIT=1 docker build \
-#     --secret id=hf_token,env=HF_TOKEN \
-#     -t <your-dockerhub-user>/flux-schnell-runpod:latest .
+# Deploy via RunPod GitHub integration:
+#   Thêm build environment variable HF_TOKEN trong RunPod -> nó được truyền vào ARG bên dưới.
 #
-# (HF_TOKEN must be a token from an account that has accepted the FLUX.1-schnell
-#  license at https://huggingface.co/black-forest-labs/FLUX.1-schnell)
+# (Hoặc build local:
+#   docker build --build-arg HF_TOKEN=$HF_TOKEN -t <user>/flux-schnell-runpod:latest . )
+#
+# HF_TOKEN phải là token từ tài khoản đã accept license FLUX.1-schnell tại
+#   https://huggingface.co/black-forest-labs/FLUX.1-schnell
 
 FROM pytorch/pytorch:2.4.1-cuda12.4-cudnn9-runtime
 
@@ -30,11 +31,11 @@ RUN pip install --upgrade pip && \
     pip install hf_transfer && \
     pip install -r requirements.txt
 
-# --- Bake model weights into the image (build-time, using HF token secret) ---
+# --- Bake model weights into the image (build-time, via HF_TOKEN build arg) ---
+ARG HF_TOKEN
+ENV HF_TOKEN=${HF_TOKEN}
 COPY builder/download_weights.py /app/builder/download_weights.py
-RUN --mount=type=secret,id=hf_token \
-    HF_TOKEN="$(cat /run/secrets/hf_token 2>/dev/null || echo "$HF_TOKEN")" \
-    python /app/builder/download_weights.py
+RUN python /app/builder/download_weights.py
 
 # --- App code ---
 COPY handler.py /app/handler.py
