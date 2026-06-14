@@ -16,6 +16,9 @@ import traceback
 
 import runpod  # phải import trước
 
+# Giảm phân mảnh VRAM (theo gợi ý của lỗi OOM). Phải set TRƯỚC khi import torch.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 # --- Cache dir: dùng Network Volume nếu có, không thì cache mặc định ---
 _VOL = "/runpod-volume"
 if os.path.isdir(_VOL) and os.access(_VOL, os.W_OK):
@@ -63,12 +66,15 @@ def _load_pipes():
         t2i = FluxPipeline.from_pretrained(MODEL_ID, torch_dtype=dtype, token=HF_TOKEN)
 
         if device == "cuda":
-            t2i.to("cuda")
+            # FLUX bf16 đầy đủ ~33GB > 24GB GPU -> model cpu offload: đẩy từng module
+            # lên GPU khi cần, đủ chạy trên 24GB (kể cả 16GB). KHÔNG gọi .to("cuda").
+            t2i.enable_model_cpu_offload()
             try:
                 t2i.enable_vae_tiling()
             except Exception:
                 pass
 
+        # img2img dùng chung modules (đã gắn offload hook) -> không tốn thêm VRAM.
         i2i = FluxImg2ImgPipeline(**t2i.components)
         _STATE["t2i"], _STATE["i2i"] = t2i, i2i
         print("[init] Pipelines ready.", flush=True)
@@ -144,7 +150,8 @@ def handler(job):
         if seed is None:
             seed = random.randint(0, 2**32 - 1)
         seed = int(seed)
-        generator = torch.Generator(device=device).manual_seed(seed)
+        # Với model cpu offload, generator để trên CPU là an toàn (theo mẫu FLUX).
+        generator = torch.Generator(device="cpu").manual_seed(seed)
 
         common = dict(
             prompt=prompt,
