@@ -36,8 +36,8 @@ from PIL import Image
 from diffusers import FluxPipeline, FluxImg2ImgPipeline
 
 MODEL_ID = os.environ.get("MODEL_ID", "black-forest-labs/FLUX.1-schnell")
-# Where weights were baked at build time (see builder/download_weights.py)
-MODEL_DIR = os.environ.get("MODEL_DIR", MODEL_ID)
+# HF token đọc lúc runtime (RunPod runtime env var hoặc Secret).
+HF_TOKEN = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
 DTYPE = torch.bfloat16
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -47,9 +47,15 @@ MAX_DIM = int(os.environ.get("MAX_DIM", "1536"))
 
 # ---------------------------------------------------------------------------
 # Load pipelines once at cold start. img2img reuses t2i components -> no extra VRAM.
+# Weights tải từ HF (gated) bằng HF_TOKEN, cache vào HF_HOME (Network Volume).
+# Lần cold start đầu tải ~24GB; các lần sau dùng lại cache trên volume.
 # ---------------------------------------------------------------------------
-print(f"[init] Loading {MODEL_DIR} on {DEVICE} ({DTYPE}) ...")
-txt2img_pipe = FluxPipeline.from_pretrained(MODEL_DIR, torch_dtype=DTYPE)
+if not HF_TOKEN:
+    print("[init] CẢNH BÁO: chưa có HF_TOKEN -> sẽ fail nếu model gated. "
+          "Đặt env var HF_TOKEN cho endpoint.")
+
+print(f"[init] Loading {MODEL_ID} on {DEVICE} ({DTYPE}) ...")
+txt2img_pipe = FluxPipeline.from_pretrained(MODEL_ID, torch_dtype=DTYPE, token=HF_TOKEN)
 
 if DEVICE == "cuda":
     # Keep everything on GPU for lowest latency. If you hit OOM on a small GPU,

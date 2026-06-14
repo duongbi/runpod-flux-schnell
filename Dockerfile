@@ -1,43 +1,34 @@
 # FLUX.1-schnell on RunPod Serverless (text-to-image + image-to-image)
 #
-# Deploy via RunPod GitHub integration:
-#   Thêm build environment variable HF_TOKEN trong RunPod -> nó được truyền vào ARG bên dưới.
+# Weights KHÔNG bake lúc build (vì RunPod GitHub build không có HF_TOKEN lúc build).
+# Thay vào đó tải lúc runtime bằng HF_TOKEN (runtime env var) và cache vào
+# Network Volume mount tại /runpod-volume -> các cold start sau dùng lại cache.
 #
-# (Hoặc build local:
-#   docker build --build-arg HF_TOKEN=$HF_TOKEN -t <user>/flux-schnell-runpod:latest . )
-#
-# HF_TOKEN phải là token từ tài khoản đã accept license FLUX.1-schnell tại
-#   https://huggingface.co/black-forest-labs/FLUX.1-schnell
+# Khi tạo endpoint nhớ:
+#   1. Gắn một Network Volume (vd 50GB) -> nó mount ở /runpod-volume
+#   2. Thêm runtime env var HF_TOKEN = token (tài khoản đã accept license FLUX.1-schnell)
 
 FROM pytorch/pytorch:2.4.1-cuda12.4-cudnn9-runtime
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     PYTHONUNBUFFERED=1 \
-    HF_HUB_ENABLE_HF_TRANSFER=1 \
     MODEL_ID=black-forest-labs/FLUX.1-schnell \
-    MODEL_DIR=/models/FLUX.1-schnell
+    HF_HOME=/runpod-volume/hf-cache
 
 WORKDIR /app
 
-# System libs needed by Pillow / opencv-style image IO
+# System libs needed by Pillow / image IO
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        git libgl1 libglib2.0-0 \
+        libgl1 libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-# Python deps (faster downloads with hf_transfer)
+# Python deps
 COPY requirements.txt .
 RUN pip install --upgrade pip && \
-    pip install hf_transfer && \
     pip install -r requirements.txt
 
-# --- Bake model weights into the image (build-time, via HF_TOKEN build arg) ---
-ARG HF_TOKEN
-ENV HF_TOKEN=${HF_TOKEN}
-COPY builder/download_weights.py /app/builder/download_weights.py
-RUN python /app/builder/download_weights.py
-
-# --- App code ---
+# --- App code (weights tải lúc runtime, xem handler.py) ---
 COPY handler.py /app/handler.py
 
 # RunPod serverless entrypoint
