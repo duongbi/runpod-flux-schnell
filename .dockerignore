@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.png
+*.jpg
+.git/
+.venv/
+venv/
+README.md
+test_input.json
+*.md
