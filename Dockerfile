@@ -13,8 +13,8 @@ FROM pytorch/pytorch:2.4.1-cuda12.4-cudnn9-runtime
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     PYTHONUNBUFFERED=1 \
-    MODEL_ID=black-forest-labs/FLUX.1-schnell \
-    HF_HOME=/runpod-volume/hf-cache
+    MODEL_ID=black-forest-labs/FLUX.1-schnell
+# HF_HOME do handler.py tự quyết lúc runtime (dùng /runpod-volume nếu có, không thì cache mặc định).
 
 WORKDIR /app
 

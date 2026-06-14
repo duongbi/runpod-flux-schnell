@@ -1,27 +1,18 @@
 """
 RunPod Serverless handler for FLUX.1-schnell.
 
-Supports two modes in a single worker:
-  - text-to-image  (no `image` in input)
-  - image-to-image (base64 `image` provided)
+Hai chế độ trong một worker:
+  - text-to-image  (không có `image` trong input)
+  - image-to-image (có `image` base64)
 
-Both modes share the same model weights (loaded once), so VRAM usage
-does not increase by supporting img2img.
+Model nạp LAZY ở request đầu tiên (không nạp lúc import) -> worker không bị
+crash-loop; nếu nạp lỗi (thiếu token, OOM, ...) sẽ trả lỗi rõ ràng cho client.
 
-Input schema (job["input"]):
-  prompt              (str, required)   - text prompt
-  image               (str, optional)   - base64-encoded init image -> enables img2img
-  strength            (float, optional) - img2img only, 0..1 (default 0.6); higher = more change
-  num_inference_steps (int, optional)   - default 4 (schnell is distilled, keep low)
-  guidance_scale      (float, optional) - default 0.0 (schnell ignores CFG)
-  width               (int, optional)   - t2i only, default 1024 (multiple of 16)
-  height              (int, optional)   - t2i only, default 1024 (multiple of 16)
-  num_images          (int, optional)   - default 1
-  seed                (int, optional)   - reproducibility; omit for random
-  max_sequence_length (int, optional)   - default 256
-
+Input (job["input"]):
+  prompt, image?, strength?, num_inference_steps?, guidance_scale?,
+  width?, height?, num_images?, seed?, max_sequence_length?
 Output:
-  { "images": [ "<base64 png>", ... ], "seed": <int>, "mode": "t2i"|"i2i" }
+  { "images": ["<base64 png>", ...], "seed": <int>, "mode": "t2i"|"i2i" }
 """
 
 import base64
@@ -30,13 +21,25 @@ import os
 import random
 import traceback
 
+# --- Cache dir: dùng Network Volume nếu có, không thì fallback cache mặc định ---
+# (Phải set TRƯỚC khi import diffusers/huggingface_hub.)
+_VOL = "/runpod-volume"
+if os.path.isdir(_VOL) and os.access(_VOL, os.W_OK):
+    os.environ["HF_HOME"] = f"{_VOL}/hf-cache"
+    print(f"[init] HF_HOME = {os.environ['HF_HOME']} (Network Volume)")
+else:
+    # Không có volume: bỏ HF_HOME nếu nó đang trỏ vào /runpod-volume (tránh ghi vào path không tồn tại).
+    if os.environ.get("HF_HOME", "").startswith(_VOL):
+        os.environ.pop("HF_HOME", None)
+    print("[init] Không thấy /runpod-volume (chưa gắn Network Volume?) -> "
+          "dùng cache mặc định trong container; mỗi cold start sẽ tải lại weights.")
+
 import torch
 import runpod
 from PIL import Image
 from diffusers import FluxPipeline, FluxImg2ImgPipeline
 
 MODEL_ID = os.environ.get("MODEL_ID", "black-forest-labs/FLUX.1-schnell")
-# HF token đọc lúc runtime (RunPod runtime env var hoặc Secret).
 HF_TOKEN = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
 DTYPE = torch.bfloat16
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -45,30 +48,43 @@ MAX_IMAGES = int(os.environ.get("MAX_IMAGES", "4"))
 MAX_STEPS = int(os.environ.get("MAX_STEPS", "8"))
 MAX_DIM = int(os.environ.get("MAX_DIM", "1536"))
 
-# ---------------------------------------------------------------------------
-# Load pipelines once at cold start. img2img reuses t2i components -> no extra VRAM.
-# Weights tải từ HF (gated) bằng HF_TOKEN, cache vào HF_HOME (Network Volume).
-# Lần cold start đầu tải ~24GB; các lần sau dùng lại cache trên volume.
-# ---------------------------------------------------------------------------
-if not HF_TOKEN:
-    print("[init] CẢNH BÁO: chưa có HF_TOKEN -> sẽ fail nếu model gated. "
-          "Đặt env var HF_TOKEN cho endpoint.")
+# Lazy state: nạp 1 lần, lỗi cache lại để trả về cho mọi request (khỏi tải lại liên tục).
+_STATE = {"t2i": None, "i2i": None, "load_error": None}
 
-print(f"[init] Loading {MODEL_ID} on {DEVICE} ({DTYPE}) ...")
-txt2img_pipe = FluxPipeline.from_pretrained(MODEL_ID, torch_dtype=DTYPE, token=HF_TOKEN)
 
-if DEVICE == "cuda":
-    # Keep everything on GPU for lowest latency. If you hit OOM on a small GPU,
-    # swap the next line for: txt2img_pipe.enable_model_cpu_offload()
-    txt2img_pipe.to("cuda")
+def _load_pipes():
+    """Nạp model lần đầu. Lỗi -> lưu vào _STATE['load_error'] (không raise)."""
+    if _STATE["t2i"] is not None or _STATE["load_error"] is not None:
+        return
+
+    if not HF_TOKEN:
+        print("[init] CẢNH BÁO: chưa có HF_TOKEN -> model gated sẽ tải lỗi (401).")
+
     try:
-        txt2img_pipe.enable_vae_tiling()
-    except Exception:
-        pass
+        print(f"[init] Loading {MODEL_ID} on {DEVICE} ({DTYPE}) ... (lần đầu có thể tải ~24GB)")
+        t2i = FluxPipeline.from_pretrained(MODEL_ID, torch_dtype=DTYPE, token=HF_TOKEN)
 
-# Share the loaded modules with the img2img pipeline (no second download / no extra VRAM).
-img2img_pipe = FluxImg2ImgPipeline(**txt2img_pipe.components)
-print("[init] Pipelines ready.")
+        if DEVICE == "cuda":
+            t2i.to("cuda")
+            try:
+                t2i.enable_vae_tiling()
+            except Exception:
+                pass
+
+        # img2img dùng chung modules -> không tốn thêm VRAM, không tải lại.
+        i2i = FluxImg2ImgPipeline(**t2i.components)
+
+        _STATE["t2i"], _STATE["i2i"] = t2i, i2i
+        print("[init] Pipelines ready.")
+    except Exception as e:
+        msg = f"Load model thất bại: {type(e).__name__}: {e}"
+        if not HF_TOKEN:
+            msg += " | Nhiều khả năng do THIẾU env var HF_TOKEN trên endpoint."
+        elif "401" in str(e) or "gated" in str(e).lower() or "restricted" in str(e).lower():
+            msg += " | HF_TOKEN sai, hoặc tài khoản chưa Accept license FLUX.1-schnell."
+        _STATE["load_error"] = msg
+        print("[init] " + msg)
+        traceback.print_exc()
 
 
 # ---------------------------------------------------------------------------
@@ -76,7 +92,7 @@ print("[init] Pipelines ready.")
 # ---------------------------------------------------------------------------
 def _decode_image(b64: str) -> Image.Image:
     if "," in b64 and b64.strip().startswith("data:"):
-        b64 = b64.split(",", 1)[1]  # strip data URL prefix
+        b64 = b64.split(",", 1)[1]
     raw = base64.b64decode(b64)
     return Image.open(io.BytesIO(raw)).convert("RGB")
 
@@ -105,6 +121,13 @@ def _clamp(val, lo, hi, default):
 # ---------------------------------------------------------------------------
 def handler(job):
     try:
+        _load_pipes()
+        if _STATE["load_error"]:
+            return {"error": _STATE["load_error"]}
+
+        txt2img_pipe = _STATE["t2i"]
+        img2img_pipe = _STATE["i2i"]
+
         inp = job.get("input") or {}
 
         prompt = inp.get("prompt")
@@ -133,13 +156,11 @@ def handler(job):
 
         init_b64 = inp.get("image")
         if init_b64:
-            # -------- image-to-image --------
             mode = "i2i"
             init_img = _decode_image(init_b64)
             strength = _clamp(inp.get("strength", 0.6), 0.05, 1.0, 0.6)
             result = img2img_pipe(image=init_img, strength=strength, **common)
         else:
-            # -------- text-to-image --------
             mode = "t2i"
             width = _round16(inp.get("width", 1024))
             height = _round16(inp.get("height", 1024))
