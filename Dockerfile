@@ -1,4 +1,4 @@
-# FLUX.1-schnell on RunPod Serverless (text-to-image + image-to-image)
+# FLUX.1-Kontext-dev on RunPod Serverless (image editing + text-to-image)
 #
 # Weights KHÔNG bake lúc build (vì RunPod GitHub build không có HF_TOKEN lúc build).
 # Thay vào đó tải lúc runtime bằng HF_TOKEN (runtime env var) và cache vào
@@ -6,14 +6,16 @@
 #
 # Khi tạo endpoint nhớ:
 #   1. Gắn một Network Volume (vd 50GB) -> nó mount ở /runpod-volume
-#   2. Thêm runtime env var HF_TOKEN = token (tài khoản đã accept license FLUX.1-schnell)
+#   2. Thêm runtime env var HF_TOKEN = token (tài khoản đã accept license FLUX.1-Kontext-dev)
 
-FROM pytorch/pytorch:2.4.1-cuda12.4-cudnn9-runtime
+# torch 2.6: diffusers mới (FluxKontextPipeline) đăng ký custom op cần torch >=2.5;
+# torch 2.4.1 gây lỗi infer_schema lúc import diffusers.
+FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     PYTHONUNBUFFERED=1 \
-    MODEL_ID=black-forest-labs/FLUX.1-schnell
+    MODEL_ID=black-forest-labs/FLUX.1-Kontext-dev
 # HF_HOME do handler.py tự quyết lúc runtime (dùng /runpod-volume nếu có, không thì cache mặc định).
 
 WORKDIR /app

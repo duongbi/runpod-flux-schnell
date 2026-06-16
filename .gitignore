@@ -24,3 +24,6 @@ Thumbs.db
 *.png
 *.jpg
 !schnell_grid.jpeg
+
+# Secrets - KHÔNG commit
+token.txt
