@@ -82,13 +82,32 @@ def _load_pipes():
         pipe = FluxKontextPipeline.from_pretrained(MODEL_ID, torch_dtype=dtype, token=HF_TOKEN)
 
         if device == "cuda":
-            # Kontext bf16 đầy đủ > 24GB GPU -> model cpu offload: đẩy từng module lên
-            # GPU khi cần, đủ chạy trên 24GB (kể cả 16GB). KHÔNG gọi .to("cuda").
-            pipe.enable_model_cpu_offload()
-            try:
-                pipe.enable_vae_tiling()
-            except Exception:
-                pass
+            # Chọn cách nạp theo VRAM:
+            #   none       -> load thẳng lên GPU, NHANH NHẤT (cần >=~40GB, vd L40/A6000 48GB)
+            #   model      -> model cpu offload, vừa GPU 24GB nhưng chậm hơn
+            #   sequential -> offload từng lớp, chạy được cả GPU nhỏ, chậm nhất
+            # GPU_OFFLOAD=auto (mặc định): >=40GB dùng "none", còn lại "model".
+            total_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+            mode = os.environ.get("GPU_OFFLOAD", "auto").lower()
+            if mode == "auto":
+                mode = "none" if total_gb >= 40 else "model"
+            print(f"[init] GPU {total_gb:.0f}GB -> offload mode = {mode}", flush=True)
+
+            if mode == "none":
+                pipe.to("cuda")  # 48GB: cả model nằm trên GPU, không swap CPU<->GPU
+            elif mode == "sequential":
+                pipe.enable_sequential_cpu_offload()
+            else:  # "model"
+                pipe.enable_model_cpu_offload()
+
+            # VAE memory-savers chỉ bật khi VRAM eo hẹp (offload); 48GB load thẳng thì
+            # bỏ qua để giữ chất lượng tốt nhất.
+            if mode != "none":
+                for fn in ("enable_vae_tiling", "enable_vae_slicing"):
+                    try:
+                        getattr(pipe, fn)()
+                    except Exception:
+                        pass
 
         _STATE["pipe"] = pipe
         print("[init] Pipeline ready.", flush=True)
